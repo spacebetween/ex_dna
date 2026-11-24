@@ -13,6 +13,10 @@
 
 - **Complete-result cache** — unchanged compiler and opt-in CLI runs reuse the
   prior clone groups without global detection or a large fragment-cache rewrite.
+- **Faster full detection** — fingerprinting computes fragment mass and start
+  line in one walk, skips fuzzy sub-hashes when `min_similarity` is `1.0`, and
+  clone snippets are rendered only for clones that pass `min_occurrences`. A
+  2,413-file project went from 58.7s to 38.1s with identical output.
 
 ## 1.5.4
 

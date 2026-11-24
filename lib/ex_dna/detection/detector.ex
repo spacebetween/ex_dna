@@ -88,7 +88,7 @@ defmodule ExDNA.Detection.Detector do
 
     (exact_clones ++ type_iii_clones)
     |> Enum.filter(&(length(&1.fragments) >= config.min_occurrences))
-    |> Enum.map(&Pipeline.attach_suggestion/1)
+    |> Enum.map(&(&1 |> Clone.put_snippets() |> Pipeline.attach_suggestion()))
     |> BehaviourSuggestion.analyze(ast_map(file_ast_pairs))
     |> Enum.sort_by(& &1.mass, :desc)
   end

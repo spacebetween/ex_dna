@@ -37,8 +37,8 @@ defmodule ExDNA.Detection.Clone do
   @doc """
   Build a clone from a group of matching fragments.
 
-  Source snippets are computed eagerly since every surviving clone
-  will have them accessed by reporters and stats.
+  Source snippets are left empty; call `put_snippets/1` once the clone is known
+  to survive filtering, since rendering them is the costly part.
   """
   @spec from_fragments([map()], clone_type()) :: t()
   def from_fragments(frags, type) do
@@ -49,19 +49,24 @@ defmodule ExDNA.Detection.Clone do
         %{file: f.file, line: f.line, ast: f.ast, mass: f.mass}
       end)
 
-    snippets =
-      Enum.map(frags, fn f ->
-        f.ast |> unwrap_grouped_def() |> safe_to_string()
-      end)
-
     %__MODULE__{
       type: type,
       hash: List.first(frags).hash,
       mass: mass,
-      fragments: locations,
-      source_snippets: snippets
+      fragments: locations
     }
   end
+
+  @doc """
+  Render source snippets for a clone that has none yet.
+  """
+  @spec put_snippets(t()) :: t()
+  def put_snippets(%__MODULE__{source_snippets: [], fragments: frags} = clone) do
+    snippets = Enum.map(frags, fn f -> f.ast |> unwrap_grouped_def() |> safe_to_string() end)
+    %{clone | source_snippets: snippets}
+  end
+
+  def put_snippets(clone), do: clone
 
   defp safe_to_string(ast) do
     Macro.to_string(ast)
