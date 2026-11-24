@@ -63,6 +63,7 @@ defmodule ExDNA.Detection.Pipeline do
         ignored_attributes: config.ignored_attributes,
         max_window_size: config.max_window_size,
         max_module_forms: config.max_module_forms,
+        sub_hashes: config.min_similarity < 1.0,
         normalize_variables: Map.get(config, :normalize_variables, true)
       )
     end

@@ -32,6 +32,9 @@ defmodule ExDNA.AST.Fingerprint do
 
   @doc """
   Walk an AST and return all subtree fragments that meet `min_mass`.
+
+  Pass `sub_hashes: false` when fuzzy detection is off; fragments then carry an
+  empty `sub_hashes` set.
   """
   @spec fragments(Macro.t(), String.t(), pos_integer(), keyword()) :: [fragment()]
   def fragments(ast, file, min_mass, opts \\ []) do
@@ -42,7 +45,8 @@ defmodule ExDNA.AST.Fingerprint do
       excluded: Keyword.get(opts, :excluded_macros, []) |> MapSet.new(),
       ignored_attrs: Keyword.get(opts, :ignored_attributes, []) |> MapSet.new(),
       max_window_size: Keyword.get(opts, :max_window_size, 4),
-      max_module_forms: Keyword.get(opts, :max_module_forms, 200)
+      max_module_forms: Keyword.get(opts, :max_module_forms, 200),
+      sub_hashes: Keyword.get(opts, :sub_hashes, true)
     }
 
     {frags, _sub_hashes, _mass, _line} = walk(ast, ctx, [])
@@ -119,7 +123,7 @@ defmodule ExDNA.AST.Fingerprint do
     line = min_line(meta_line(meta), child_line)
 
     my_sub_hash =
-      if mass >= @sub_hash_min_mass do
+      if ctx.sub_hashes and mass >= @sub_hash_min_mass do
         child_forms = Enum.map(args, &child_form/1)
         MapSet.new([:erlang.phash2({form, child_forms, mass})])
       else
