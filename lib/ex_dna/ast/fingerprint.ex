@@ -45,34 +45,38 @@ defmodule ExDNA.AST.Fingerprint do
       max_module_forms: Keyword.get(opts, :max_module_forms, 200)
     }
 
-    {_ast, frags, _sub_hashes} = walk(ast, ctx, [])
+    {frags, _sub_hashes, _mass, _line} = walk(ast, ctx, [])
     frags
   end
 
-  # __block__ — walk children, track per-child sub-hashes for window construction
-  defp walk({:__block__, _meta, args} = node, ctx, acc) when is_list(args) do
-    {acc, per_child_subs, all_subs} =
-      Enum.reduce(args, {acc, [], MapSet.new()}, fn child, {a, per_child, all} ->
-        {_, a, child_s} = walk(child, ctx, a)
-        {a, [child_s | per_child], MapSet.union(all, child_s)}
-      end)
+  # Each walk clause returns {fragments, sub_hashes, mass, min_line} for its subtree,
+  # so mass and start line are computed once per node rather than once per ancestor.
 
-    per_child_subs = Enum.reverse(per_child_subs)
+  # __block__ — walk children, track per-child info for window construction
+  defp walk({:__block__, meta, args}, ctx, acc) when is_list(args) do
+    {acc, per_child, all_subs, mass, line} =
+      Enum.reduce(args, {acc, [], MapSet.new(), 1, meta_line(meta)}, fn child,
+                                                                        {a, per_child, all, m, l} ->
+        {a, child_s, child_m, child_l} = walk(child, ctx, a)
+
+        {a, [{child_s, child_m, child_l} | per_child], MapSet.union(all, child_s), m + child_m,
+         min_line(l, child_l)}
+      end)
 
     acc =
       if module_body?(args, ctx) do
-        sibling_windows(args, per_child_subs, ctx, acc)
+        sibling_windows(args, Enum.reverse(per_child), ctx, acc)
       else
         acc
       end
 
-    {node, acc, all_subs}
+    {acc, all_subs, mass, line}
   end
 
   # Module attribute (@attr value) — skip ignored attributes, fingerprint the rest
   defp walk({:@, _meta, [{attr_name, _, _}]} = node, ctx, acc) when is_atom(attr_name) do
     if MapSet.member?(ctx.ignored_attrs, attr_name) do
-      {node, acc, MapSet.new()}
+      skipped(node, acc)
     else
       do_walk_call(node, ctx, acc)
     end
@@ -81,29 +85,38 @@ defmodule ExDNA.AST.Fingerprint do
   # Regular call nodes — walk children, fingerprint if large enough
   defp walk({form, _meta, args} = node, ctx, acc) when is_list(args) do
     if excluded_macro?(form, ctx.excluded) do
-      {node, acc, MapSet.new()}
+      skipped(node, acc)
     else
       do_walk_call(node, ctx, acc)
     end
   end
 
   defp walk({left, right}, ctx, acc) do
-    {_, acc, subs_l} = walk(left, ctx, acc)
-    {_, acc, subs_r} = walk(right, ctx, acc)
-    {{left, right}, acc, MapSet.union(subs_l, subs_r)}
+    {acc, subs_l, mass_l, line_l} = walk(left, ctx, acc)
+    {acc, subs_r, mass_r, line_r} = walk(right, ctx, acc)
+    {acc, MapSet.union(subs_l, subs_r), 1 + mass_l + mass_r, min_line(line_l, line_r)}
   end
 
   defp walk(list, ctx, acc) when is_list(list) do
-    {acc, subs} = walk_children(list, ctx, acc)
-    {list, acc, subs}
+    {acc, subs, mass, line} = walk_children(list, ctx, acc)
+    {acc, subs, mass, line}
   end
 
-  defp walk(leaf, _ctx, acc), do: {leaf, acc, MapSet.new()}
+  defp walk({_name, meta, context}, _ctx, acc) when is_atom(context),
+    do: {acc, MapSet.new(), 1, meta_line(meta)}
 
-  defp do_walk_call({form, _meta, args} = node, ctx, acc) do
-    {acc, child_subs} = walk_children(args, ctx, acc)
+  defp walk(_leaf, _ctx, acc), do: {acc, MapSet.new(), 1, nil}
 
-    mass = mass(node)
+  defp skipped(node, acc) do
+    {line, _} = Location.line_range(node)
+    {acc, MapSet.new(), mass(node), line}
+  end
+
+  defp do_walk_call({form, meta, args} = node, ctx, acc) do
+    {acc, child_subs, child_mass, child_line} = walk_children(args, ctx, acc)
+
+    mass = 1 + child_mass
+    line = min_line(meta_line(meta), child_line)
 
     my_sub_hash =
       if mass >= @sub_hash_min_mass do
@@ -118,29 +131,35 @@ defmodule ExDNA.AST.Fingerprint do
     if mass >= ctx.min_mass do
       normalized = Normalizer.normalize(node, ctx.norm_opts)
       hash = compute_hash(normalized)
-      line = Location.start_line(node)
 
       frag = %{
         hash: hash,
         mass: mass,
         ast: node,
         file: ctx.file,
-        line: line,
+        line: line || 0,
         sub_hashes: all_subs
       }
 
-      {node, [frag | acc], all_subs}
+      {[frag | acc], all_subs, mass, line}
     else
-      {node, acc, all_subs}
+      {acc, all_subs, mass, line}
     end
   end
 
   defp walk_children(children, ctx, acc) do
-    Enum.reduce(children, {acc, MapSet.new()}, fn child, {a, subs} ->
-      {_, a, child_s} = walk(child, ctx, a)
-      {a, MapSet.union(subs, child_s)}
+    Enum.reduce(children, {acc, MapSet.new(), 0, nil}, fn child, {a, subs, m, l} ->
+      {a, child_s, child_m, child_l} = walk(child, ctx, a)
+      {a, MapSet.union(subs, child_s), m + child_m, min_line(l, child_l)}
     end)
   end
+
+  defp meta_line(meta) when is_list(meta), do: Keyword.get(meta, :line)
+  defp meta_line(_meta), do: nil
+
+  defp min_line(nil, line), do: line
+  defp min_line(line, nil), do: line
+  defp min_line(a, b), do: min(a, b)
 
   # --- Sibling windows ---
 
@@ -152,13 +171,13 @@ defmodule ExDNA.AST.Fingerprint do
       end)
   end
 
-  defp sibling_windows([], _per_child_subs, _ctx, acc), do: acc
-  defp sibling_windows([_], _per_child_subs, _ctx, acc), do: acc
+  defp sibling_windows([], _per_child, _ctx, acc), do: acc
+  defp sibling_windows([_], _per_child, _ctx, acc), do: acc
 
-  defp sibling_windows(children, per_child_subs, ctx, acc) do
-    children_with_subs =
+  defp sibling_windows(children, per_child, ctx, acc) do
+    children_with_info =
       children
-      |> Enum.zip(per_child_subs)
+      |> Enum.zip(per_child)
       |> Enum.reject(fn
         {{:@, _, [{attr_name, _, _}]}, _} when is_atom(attr_name) ->
           MapSet.member?(ctx.ignored_attrs, attr_name)
@@ -170,22 +189,21 @@ defmodule ExDNA.AST.Fingerprint do
           false
       end)
 
-    len = length(children_with_subs)
+    len = length(children_with_info)
     max_win = min(ctx.max_window_size, len)
 
     Enum.reduce(2..max_win//1, acc, fn window_size, acc_outer ->
-      children_with_subs
+      children_with_info
       |> Enum.chunk_every(window_size, 1, :discard)
-      |> Enum.reduce(acc_outer, fn window_with_subs, acc_inner ->
-        {window, subs_list} = Enum.unzip(window_with_subs)
-        window_subs = Enum.reduce(subs_list, MapSet.new(), &MapSet.union/2)
-        maybe_window_fragment(window, window_subs, ctx, acc_inner)
+      |> Enum.reduce(acc_outer, fn window_with_info, acc_inner ->
+        maybe_window_fragment(window_with_info, ctx, acc_inner)
       end)
     end)
   end
 
-  defp maybe_window_fragment(window, window_subs, ctx, acc) do
-    combined_mass = Enum.sum(Enum.map(window, &mass/1))
+  defp maybe_window_fragment(window_with_info, ctx, acc) do
+    {window, infos} = Enum.unzip(window_with_info)
+    combined_mass = Enum.reduce(infos, 0, fn {_s, m, _l}, sum -> sum + m end)
 
     if combined_mass < ctx.min_mass do
       acc
@@ -199,8 +217,9 @@ defmodule ExDNA.AST.Fingerprint do
         mass: combined_mass,
         ast: synthetic,
         file: ctx.file,
-        line: Location.start_line(synthetic),
-        sub_hashes: window_subs
+        line: Enum.reduce(infos, nil, fn {_s, _m, l}, acc -> min_line(acc, l) end) || 0,
+        sub_hashes:
+          Enum.reduce(infos, MapSet.new(), fn {s, _m, _l}, acc -> MapSet.union(s, acc) end)
       }
 
       [frag | acc]
